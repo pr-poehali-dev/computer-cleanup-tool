@@ -3,11 +3,12 @@ import Icon from "@/components/ui/icon";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type CleanTask = { id: string; label: string; size: string; enabled: boolean };
+type CleanTask = { id: string; label: string; size: string; enabled: boolean; scanned?: boolean; scannedSize?: string };
 type Module = { id: string; name: string; icon: string; color: string; glowRgb: string; tasks: CleanTask[] };
 type LogEntry = { id: number; text: string; type: "info" | "success" };
 type HistoryEntry = { date: string; freed: string; modules: string[] };
 type Tab = "clean" | "schedule" | "stats" | "settings";
+type AppState = "idle" | "scanning" | "ready" | "cleaning" | "done";
 
 // ─── Data ─────────────────────────────────────────────────────────────────────
 
@@ -105,6 +106,94 @@ const parseMb = (size: string) => {
 const fmtMb = (mb: number) =>
   mb >= 1024 ? `${(mb / 1024).toFixed(1)} ГБ` : `${Math.round(mb)} МБ`;
 
+// Генерирует случайный размер ±30% от базового
+const randomizeSize = (baseMb: number) => {
+  const factor = 0.7 + Math.random() * 0.6;
+  return fmtMb(Math.round(baseMb * factor));
+};
+
+// ─── ScanRadar component ───────────────────────────────────────────────────────
+
+function ScanRadar({ progress, label }: { progress: number; label: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-6">
+      <div className="relative w-36 h-36 mb-5">
+        {/* Rings */}
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="absolute rounded-full"
+            style={{
+              inset: `${i * 18}px`,
+              border: "1px solid rgba(0,212,255,0.15)",
+              animation: `ping ${1.8 + i * 0.4}s ease-out infinite`,
+              animationDelay: `${i * 0.3}s`,
+            }}
+          />
+        ))}
+        {/* Rotating sweep */}
+        <div
+          className="absolute inset-0 rounded-full overflow-hidden"
+          style={{ animation: "spin-slow 2s linear infinite" }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              top: "50%", left: "50%",
+              width: "50%", height: "2px",
+              transformOrigin: "left center",
+              background: "linear-gradient(90deg, rgba(0,212,255,0.9), transparent)",
+              boxShadow: "0 0 8px rgba(0,212,255,0.8)",
+            }}
+          />
+        </div>
+        {/* Center dot */}
+        <div
+          className="absolute inset-0 flex items-center justify-center"
+          style={{ zIndex: 2 }}
+        >
+          <div
+            className="w-4 h-4 rounded-full"
+            style={{
+              background: "#00d4ff",
+              boxShadow: "0 0 20px rgba(0,212,255,1), 0 0 40px rgba(0,212,255,0.5)",
+            }}
+          />
+        </div>
+        {/* Arc progress */}
+        <svg className="absolute inset-0 w-full h-full -rotate-90" viewBox="0 0 144 144">
+          <circle cx="72" cy="72" r="66" fill="none" stroke="rgba(0,212,255,0.08)" strokeWidth="2" />
+          <circle
+            cx="72" cy="72" r="66"
+            fill="none"
+            stroke="url(#scanGrad)"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeDasharray={`${2 * Math.PI * 66}`}
+            strokeDashoffset={`${2 * Math.PI * 66 * (1 - progress / 100)}`}
+            style={{ transition: "stroke-dashoffset 0.4s ease" }}
+          />
+          <defs>
+            <linearGradient id="scanGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+              <stop offset="0%" stopColor="#00d4ff" />
+              <stop offset="100%" stopColor="#a855f7" />
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <div
+        className="text-2xl font-black mb-1"
+        style={{ fontFamily: "'Montserrat', sans-serif", color: "#00d4ff", textShadow: "0 0 20px rgba(0,212,255,0.7)" }}
+      >
+        {progress}%
+      </div>
+      <div className="text-xs" style={{ color: "rgba(255,255,255,0.45)", fontFamily: "monospace" }}>
+        {label}
+      </div>
+    </div>
+  );
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function ModuleCard({ module, cleaning, onToggle }: {
@@ -158,9 +247,19 @@ function ModuleCard({ module, cleaning, onToggle }: {
               </div>
               <span className="text-sm" style={{ color: "rgba(255,255,255,0.8)" }}>{task.label}</span>
             </div>
-            <span className="text-xs font-semibold" style={{ color: task.enabled ? "#00d4ff" : "rgba(255,255,255,0.25)" }}>
-              {task.size}
-            </span>
+            <div className="flex flex-col items-end gap-0.5 shrink-0">
+              {task.scanned && task.scannedSize && task.scannedSize !== task.size ? (
+                <>
+                  <span className="text-xs font-bold" style={{ color: "#00ff88" }}>{task.scannedSize}</span>
+                  <span className="text-xs line-through" style={{ color: "rgba(255,255,255,0.2)", fontSize: "10px" }}>{task.size}</span>
+                </>
+              ) : (
+                <span className="text-xs font-semibold" style={{ color: task.enabled ? (task.scanned ? "#00ff88" : "#00d4ff") : "rgba(255,255,255,0.25)" }}>
+                  {task.scannedSize ?? task.size}
+                  {task.scanned && <span style={{ marginLeft: 4, color: "#00ff88", fontSize: "10px" }}>✓</span>}
+                </span>
+              )}
+            </div>
           </div>
         ))}
       </div>
@@ -173,13 +272,18 @@ function ModuleCard({ module, cleaning, onToggle }: {
 export default function Index() {
   const [tab, setTab] = useState<Tab>("clean");
   const [modules, setModules] = useState<Module[]>(INITIAL_MODULES);
-  const [cleaning, setCleaning] = useState(false);
+  const [appState, setAppState] = useState<AppState>("idle");
+  const [scanProgress, setScanProgress] = useState(0);
+  const [scanLabel, setScanLabel] = useState("");
   const [progress, setProgress] = useState(0);
-  const [done, setDone] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [totalFreed, setTotalFreed] = useState("0 МБ");
   const [animIn, setAnimIn] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
+
+  const cleaning = appState === "cleaning";
+  const done = appState === "done";
+  const scanning = appState === "scanning";
 
   // Schedule state
   const [schedEnabled, setSchedEnabled] = useState(false);
@@ -206,7 +310,7 @@ export default function Index() {
   }, [logs]);
 
   const toggleTask = (mid: string, tid: string) => {
-    if (cleaning) return;
+    if (cleaning || scanning) return;
     setModules((prev) =>
       prev.map((m) => m.id === mid
         ? { ...m, tasks: m.tasks.map((t) => t.id === tid ? { ...t, enabled: !t.enabled } : t) }
@@ -215,24 +319,62 @@ export default function Index() {
     );
   };
 
-  const calcTotal = () => {
+  const calcTotal = (mods = modules) => {
     let mb = 0;
-    modules.forEach((m) => m.tasks.forEach((t) => { if (t.enabled) mb += parseMb(t.size); }));
+    mods.forEach((m) => m.tasks.forEach((t) => { if (t.enabled) mb += parseMb(t.scannedSize ?? t.size); }));
     return fmtMb(mb);
   };
 
   const enabledCount = modules.reduce((acc, m) => acc + m.tasks.filter((t) => t.enabled).length, 0);
 
+  // ── Phase 1: Scanning ──
+  const startScan = async () => {
+    if (appState !== "idle" || enabledCount === 0) return;
+    setAppState("scanning");
+    setScanProgress(0);
+
+    const active = modules.filter((m) => m.tasks.some((t) => t.enabled));
+    const allTasks = active.flatMap((m) => m.tasks.filter((t) => t.enabled));
+    const total = allTasks.length;
+    let step = 0;
+
+    const updatedModules = modules.map((m) => ({ ...m, tasks: m.tasks.map((t) => ({ ...t, scanned: false, scannedSize: undefined })) }));
+
+    for (const mod of active) {
+      for (const task of mod.tasks.filter((t) => t.enabled)) {
+        setScanLabel(`Сканирование: ${task.label}...`);
+        await new Promise((r) => setTimeout(r, 400 + Math.random() * 400));
+        const newSize = randomizeSize(parseMb(task.size));
+        const modIdx = updatedModules.findIndex((m) => m.id === mod.id);
+        const taskIdx = updatedModules[modIdx].tasks.findIndex((t) => t.id === task.id);
+        updatedModules[modIdx] = {
+          ...updatedModules[modIdx],
+          tasks: updatedModules[modIdx].tasks.map((t, i) =>
+            i === taskIdx ? { ...t, scanned: true, scannedSize: newSize } : t
+          ),
+        };
+        step++;
+        setScanProgress(Math.round((step / total) * 100));
+        setModules([...updatedModules]);
+      }
+    }
+
+    setScanLabel("Сканирование завершено!");
+    await new Promise((r) => setTimeout(r, 600));
+    setAppState("ready");
+  };
+
+  // ── Phase 2: Cleaning ──
   const startCleaning = async () => {
-    if (cleaning || enabledCount === 0) return;
-    setCleaning(true); setDone(false); setProgress(0); setLogs([]);
+    if (appState !== "ready" || enabledCount === 0) return;
+    setAppState("cleaning"); setProgress(0); setLogs([]);
     let idCounter = 0;
     const active = modules.filter((m) => m.tasks.some((t) => t.enabled));
     const totalSteps = active.reduce((acc, m) => acc + LOG_MESSAGES[m.id].length, 0);
     let step = 0;
     for (const m of active) {
       for (const msg of LOG_MESSAGES[m.id]) {
-        await new Promise((r) => setTimeout(r, 300 + Math.random() * 300));
+        await new Promise((r) => setTimeout(r, 280 + Math.random() * 280));
         setLogs((prev) => [...prev, { id: ++idCounter, text: msg.text, type: msg.success ? "success" : "info" }]);
         step++;
         setProgress(Math.round((step / totalSteps) * 100));
@@ -240,13 +382,16 @@ export default function Index() {
     }
     await new Promise((r) => setTimeout(r, 300));
     const freed = calcTotal();
-    setProgress(100); setTotalFreed(freed); setDone(true); setCleaning(false);
+    setProgress(100); setTotalFreed(freed); setAppState("done");
     const now = new Date();
     const label = `${now.getDate()} ${["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"][now.getMonth()]}, ${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
     setHistory((prev) => [{ date: label, freed, modules: active.map((m) => m.name.split(" ")[0]) }, ...prev]);
   };
 
-  const reset = () => { setDone(false); setProgress(0); setLogs([]); setTotalFreed("0 МБ"); };
+  const reset = () => {
+    setAppState("idle"); setProgress(0); setLogs([]); setTotalFreed("0 МБ"); setScanProgress(0);
+    setModules(INITIAL_MODULES);
+  };
 
   const TABS: { id: Tab; label: string; icon: string }[] = [
     { id: "clean", label: "Очистка", icon: "Zap" },
@@ -360,16 +505,22 @@ export default function Index() {
                   className="text-5xl font-black leading-none"
                   style={{
                     fontFamily: "'Montserrat', sans-serif",
-                    color: done ? "#00ff88" : "#00d4ff",
-                    textShadow: done ? "0 0 40px rgba(0,255,136,0.7)" : "0 0 40px rgba(0,212,255,0.7)",
+                    color: done ? "#00ff88" : appState === "ready" ? "#00ff88" : "#00d4ff",
+                    textShadow: done || appState === "ready" ? "0 0 40px rgba(0,255,136,0.7)" : "0 0 40px rgba(0,212,255,0.7)",
                     transition: "all 0.6s ease",
                   }}
                 >
                   {done ? totalFreed : calcTotal()}
                 </div>
                 <div className="text-xs mt-2" style={{ color: "rgba(255,255,255,0.38)" }}>
-                  {done ? "освобождено" : "будет очищено"}
+                  {done ? "освобождено" : appState === "ready" ? "найдено — готово к очистке" : appState === "scanning" ? "сканирование..." : "будет очищено"}
                 </div>
+                {appState === "ready" && (
+                  <div className="mt-2 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold"
+                    style={{ background: "rgba(0,255,136,0.1)", border: "1px solid rgba(0,255,136,0.25)", color: "#00ff88" }}>
+                    <Icon name="ScanSearch" size={11} />Сканирование завершено
+                  </div>
+                )}
               </div>
               <div className="grid grid-cols-3 gap-2 mb-5">
                 {[
@@ -383,6 +534,11 @@ export default function Index() {
                   </div>
                 ))}
               </div>
+              {/* Scan radar inside panel */}
+              {scanning && (
+                <ScanRadar progress={scanProgress} label={scanLabel} />
+              )}
+
               {(cleaning || done) && (
                 <div className="h-2 rounded-full mb-5 overflow-hidden" style={{ background: "rgba(255,255,255,0.07)" }}>
                   <div
@@ -396,38 +552,66 @@ export default function Index() {
                   />
                 </div>
               )}
-              {!done ? (
+
+              {/* Buttons */}
+              {appState === "idle" && (
                 <button
-                  onClick={startCleaning}
-                  disabled={cleaning || enabledCount === 0}
+                  onClick={startScan}
+                  disabled={enabledCount === 0}
                   className="w-full py-4 rounded-xl font-bold text-sm transition-all duration-300"
                   style={{
-                    background: cleaning || enabledCount === 0 ? "rgba(0,212,255,0.08)" : "linear-gradient(135deg,#00d4ff 0%,#a855f7 100%)",
-                    color: cleaning || enabledCount === 0 ? "rgba(0,212,255,0.5)" : "#000",
-                    boxShadow: cleaning || enabledCount === 0 ? "none" : "0 6px 30px rgba(0,212,255,0.4)",
-                    border: cleaning || enabledCount === 0 ? "1px solid rgba(0,212,255,0.2)" : "none",
-                    cursor: cleaning || enabledCount === 0 ? "not-allowed" : "pointer",
+                    background: enabledCount === 0 ? "rgba(0,212,255,0.08)" : "linear-gradient(135deg,#00d4ff 0%,#a855f7 100%)",
+                    color: enabledCount === 0 ? "rgba(0,212,255,0.5)" : "#000",
+                    boxShadow: enabledCount === 0 ? "none" : "0 6px 30px rgba(0,212,255,0.4)",
+                    border: enabledCount === 0 ? "1px solid rgba(0,212,255,0.2)" : "none",
+                    cursor: enabledCount === 0 ? "not-allowed" : "pointer",
                     fontFamily: "'Golos Text', sans-serif", fontWeight: 700,
                   }}
                 >
-                  {cleaning ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <Icon name="Loader2" size={16} className="animate-spin" />Очистка...
-                    </span>
-                  ) : (
-                    <span className="flex items-center justify-center gap-2">
-                      <Icon name="Zap" size={16} />Начать очистку
-                    </span>
-                  )}
+                  <span className="flex items-center justify-center gap-2">
+                    <Icon name="ScanSearch" size={16} />Сканировать систему
+                  </span>
                 </button>
-              ) : (
+              )}
+
+              {appState === "scanning" && (
+                <button disabled className="w-full py-4 rounded-xl font-bold text-sm"
+                  style={{ background: "rgba(0,212,255,0.08)", color: "rgba(0,212,255,0.5)", border: "1px solid rgba(0,212,255,0.2)", cursor: "not-allowed", fontFamily: "'Golos Text', sans-serif" }}>
+                  <span className="flex items-center justify-center gap-2">
+                    <Icon name="Loader2" size={16} className="animate-spin" />Сканирование...
+                  </span>
+                </button>
+              )}
+
+              {appState === "ready" && (
                 <button
-                  onClick={reset}
-                  className="w-full py-4 rounded-xl font-bold text-sm"
+                  onClick={startCleaning}
+                  className="w-full py-4 rounded-xl font-bold text-sm transition-all duration-300"
                   style={{ background: "linear-gradient(135deg,#00ff88 0%,#00d4ff 100%)", color: "#000", boxShadow: "0 6px 30px rgba(0,255,136,0.4)", cursor: "pointer", fontFamily: "'Golos Text', sans-serif", fontWeight: 700 }}
                 >
                   <span className="flex items-center justify-center gap-2">
-                    <Icon name="RotateCcw" size={16} />Очистить снова
+                    <Icon name="Zap" size={16} />Начать очистку
+                  </span>
+                </button>
+              )}
+
+              {appState === "cleaning" && (
+                <button disabled className="w-full py-4 rounded-xl font-bold text-sm"
+                  style={{ background: "rgba(0,212,255,0.08)", color: "rgba(0,212,255,0.5)", border: "1px solid rgba(0,212,255,0.2)", cursor: "not-allowed", fontFamily: "'Golos Text', sans-serif" }}>
+                  <span className="flex items-center justify-center gap-2">
+                    <Icon name="Loader2" size={16} className="animate-spin" />Очистка...
+                  </span>
+                </button>
+              )}
+
+              {appState === "done" && (
+                <button
+                  onClick={reset}
+                  className="w-full py-4 rounded-xl font-bold text-sm"
+                  style={{ background: "linear-gradient(135deg,#a855f7 0%,#00d4ff 100%)", color: "#fff", boxShadow: "0 6px 30px rgba(168,85,247,0.4)", cursor: "pointer", fontFamily: "'Golos Text', sans-serif", fontWeight: 700 }}
+                >
+                  <span className="flex items-center justify-center gap-2">
+                    <Icon name="RotateCcw" size={16} />Повторить
                   </span>
                 </button>
               )}
